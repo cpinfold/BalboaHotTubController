@@ -25,7 +25,7 @@ namespace BalboaHotTubController.Properties {
         
         [global::System.Configuration.UserScopedSettingAttribute()]
         [global::System.Diagnostics.DebuggerNonUserCodeAttribute()]
-        [global::System.Configuration.DefaultSettingValueAttribute("00000000-00000000-001527ff-ff2380b8")]
+        [global::System.Configuration.DefaultSettingValueAttribute("")]
         public string deviceId {
             get {
                 return ((string)(this["deviceId"]));
