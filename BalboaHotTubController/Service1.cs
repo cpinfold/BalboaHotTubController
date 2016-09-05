@@ -26,7 +26,7 @@ namespace BalboaHotTubController
         {
             try
             {
-                string serviceAddress = "http://beechy.ddns.net:2001";
+                string serviceAddress = $"http://{Properties.Settings.Default.hostName}:2001";
 
                 Uri baseAddress = new Uri(serviceAddress);
                 serviceHost?.Close();
