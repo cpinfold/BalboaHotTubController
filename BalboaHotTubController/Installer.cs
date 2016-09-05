@@ -24,7 +24,7 @@ namespace BalboaHotTubController
             serviceInstaller1 = new ServiceInstaller();
 
             // The services run under the system account.
-            processInstaller.Account = ServiceAccount.NetworkService;
+            processInstaller.Account = ServiceAccount.LocalSystem;
 
             // The services are started manually.
             serviceInstaller1.StartType = ServiceStartMode.Automatic;
