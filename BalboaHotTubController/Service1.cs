@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using System.ServiceProcess;
 using System.ServiceModel;
 using System.Configuration;
+using System.Net;
 using System.Threading;
 
 namespace BalboaHotTubController
@@ -26,7 +27,8 @@ namespace BalboaHotTubController
         {
             try
             {
-                string serviceAddress = $"http://{Properties.Settings.Default.hostName}:2001";
+
+                string serviceAddress = $"http://{new WebClient().DownloadString("http://icanhazip.com").TrimEnd(Environment.NewLine.ToCharArray())}:2001";
 
                 Uri baseAddress = new Uri(serviceAddress);
                 serviceHost?.Close();

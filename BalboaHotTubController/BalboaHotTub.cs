@@ -1,21 +1,28 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
 using System.Runtime.InteropServices;
+using System.ServiceModel.Dispatcher;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Xml;
 using BalboaHotTubController.Properties;
+using Newtonsoft.Json;
+using Formatting = Newtonsoft.Json.Formatting;
 
 namespace BalboaHotTubController
 {
     public class BalboaHotTub : IDisposable, IBalboaHotTub
     {
-        public string DeviceId { get; internal set; }
+        public static string DeviceId { get; internal set; }
+
+        // Display panel raw data. This is in hex
         private string[] _panelInfoRawData = null;
+        // Provides a safe way to access the display panel raw data
         private string[] _getPanelInfo_RawData
         {
             get
@@ -30,8 +37,10 @@ namespace BalboaHotTubController
             }
         }
 
+        // Display configuration raw data. This is in hex
         private string[] _deviceConfiguration_RawData = null;
-        public string[] _getDeviceConfiguration_RawData
+        // Provides a safe way to access the device configuration raw data
+        private string[] _getDeviceConfiguration_RawData
         {
             get
             {
@@ -45,27 +54,16 @@ namespace BalboaHotTubController
             }
         }
 
+        // Cancellation token is set when the object is disposed. This ends any tasks which are executing
         private readonly CancellationTokenSource _cancelToken = new CancellationTokenSource();
-
-        public BalboaHotTub(string deviceId)
-        {
-            DeviceId = deviceId;
-
-            Task.Factory.StartNew(() =>
-            {
-                while (!_cancelToken.IsCancellationRequested)
-                {
-                    // Update our data read
-                    UpdateHotTub_RawData(DeviceId);
-                    Thread.Sleep(2000);
-                }
-            }, TaskCreationOptions.LongRunning);
-        }
-
+        
         public BalboaHotTub()
         {
-            DeviceId = Settings.Default.deviceId;
+            Trace.AutoFlush = true;
+            
+            GetDeviceId();
 
+            // Set up a thread which will update the raw hot tub information every 2 seconds
             Task.Factory.StartNew(() =>
             {
                 while (!_cancelToken.IsCancellationRequested)
@@ -77,32 +75,82 @@ namespace BalboaHotTubController
             }, TaskCreationOptions.LongRunning);
         }
 
-        public string Get_Temperature_Unit()
+        private void GetDeviceId()
         {
-            switch (_getPanelInfo_RawData[PanelInfo.TEMPERATURE_UNIT])
+            if (string.IsNullOrEmpty(DeviceId))
             {
-                case "03":
-                    return "c";
-                case "02":
-                    return "f";
-                default:
-                    return "";
+                // Construct the URL which will feed back information on hot tubs local to this public IP address
+                var url = $"https://my.idigi.com/ws/DeviceCore/.json?condition=dpGlobalIp='{GetPublicIP()}'";
+
+                while (true)
+                {
+                    var wr = (HttpWebRequest) WebRequest.Create(url);
+                    AddBalboaHttpHeaders(wr);
+                    wr.Method = "GET";
+                    try
+                    {
+                        var response = wr.GetResponse() as HttpWebResponse;
+
+                        using (var reader = new StreamReader(response.GetResponseStream(), new ASCIIEncoding()))
+                        {
+                            // Deseralise the returned data and extract the device id for hot tub #1
+                            string responseText = reader.ReadToEnd();
+                            dynamic obj = JsonConvert.DeserializeObject(responseText);
+
+                            DeviceId = obj.items[0].devConnectwareId;
+                            break;
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // The server will frequently return a too many requests error. This is what makes the balboa app so slow. We deal with it by retrying until we get a success
+                        Trace.WriteLine(ex.Message);
+                        Thread.Sleep(2000);
+                    }
+                }
             }
+
+            Trace.WriteLine($"Determined device id to be: {DeviceId}");
         }
 
-        public long Get_CurrentTemperature() => ConvertHexToTemperature(_getPanelInfo_RawData[PanelInfo.CURRENT_TEMPERATURE]);
-
-        public long Get_TargetTemperature()
+        public string TemperatureUnit
         {
-            return ConvertHexToTemperature(_getPanelInfo_RawData[PanelInfo.TARGET_TEMPERATURE]); 
+            get
+            {
+                switch (_getPanelInfo_RawData[PanelInfo.TEMPERATURE_UNIT])
+                {
+                    case "03":
+                        return "c";
+                    case "02":
+                        return "f";
+                    default:
+                        return "";
+                }
+            }
+            set { }
         }
-        public void Set_TargetTemperature(string value)
+        
+        public long CurrentTemperature
+        {
+            get { return ConvertHexToTemperature(_getPanelInfo_RawData[PanelInfo.CURRENT_TEMPERATURE]);}
+            set { }
+        }
+
+        public long TargetTemperature
+        {
+            get { return ConvertHexToTemperature(_getPanelInfo_RawData[PanelInfo.TARGET_TEMPERATURE]); }
+            set { }
+        }
+
+        public BalboaHotTub Set_TargetTemperature(string value)
         {
             var data = "<sci_request version=\"1.0\"><data_service><targets>" +
                     $"<device id=\"{DeviceId}\"/></targets><requests>" +
                     $"<device_request target_name=\"SetTemp\">{value}.000000</device_request></requests></data_service></sci_request>";
 
             BalboaHttpRequest(data);
+
+            return this;
         }
 
         private static long ConvertHexToTemperature(string hexValue)
@@ -130,10 +178,6 @@ namespace BalboaHotTubController
             {
                 throw new NotImplementedException();
             }
-        }
-        public string Get_HeatMode()
-        {
-            return HeatMode.ToString();
         }
 
         public LEDState LED
@@ -172,14 +216,36 @@ namespace BalboaHotTubController
                 }
             }
         }
-
-        public string GetLED()
-        {
-            return LED.ToString();
-        }
-        public void Set_LED(string value)
+        
+        public BalboaHotTub Set_LED(string value)
         {
             LED = (LEDState)Enum.Parse(typeof(LEDState), value);
+
+            _panelInfoRawData = null;
+            return this;
+        }
+
+        public BalboaHotTub ToggleLEDState()
+        {
+            switch (LED)
+            {
+                case LEDState.Off:
+                    LED = LEDState.Cycle;
+                    break;
+                case LEDState.Purple:
+                case LEDState.Blue:
+                case LEDState.Red:
+                case LEDState.Green:
+                case LEDState.Cycle:
+                case LEDState.Fade:
+                    LED = LEDState.Off;
+                    break;
+                default:
+                    throw new ArgumentOutOfRangeException();
+            }
+
+            _panelInfoRawData = null;
+            return this;
         }
 
         private void updateJetSpeed()
@@ -270,13 +336,12 @@ namespace BalboaHotTubController
                 }
             }
         }
-        public string Get_Jet1()
-        {
-            return Jet1.ToString();
-        }
-        public void Set_Jet1(string value)
+        public BalboaHotTub Set_Jet1(string value)
         {
             Jet1 = (JetSpeed)Enum.Parse(typeof(JetSpeed), value);
+            
+            _panelInfoRawData = null;
+            return this;
         }
 
         private JetSpeed _jet2;
@@ -314,18 +379,17 @@ namespace BalboaHotTubController
                 }
             }
         }
-        public string Get_Jet2()
-        {
-            return Jet2.ToString();
-        }
-        public void Set_Jet2(string value)
+        public BalboaHotTub Set_Jet2(string value)
         {
             Jet2 = (JetSpeed)Enum.Parse(typeof(JetSpeed), value);
+            
+            _panelInfoRawData = null;
+            return this;
         }
 
-        private string LEDLights_Button()
+        private void LEDLights_Button()
         {
-            return LEDLights_Button(DeviceId);
+            LEDLights_Button(DeviceId);
         }
 
         private static string PressButton(string deviceId, string buttonNumber)
@@ -358,25 +422,35 @@ namespace BalboaHotTubController
             return PressButton(deviceId, "17");
         }
 
-        public void RunChemicalJetCycle()
+        public bool ChemicalCycleRunning = false;
+
+        public void RunChemicalCycle()
         {
-            Jet1 = JetSpeed.One; // Put jets 1 into speed 1
-            Jet2 = JetSpeed.One; // Turn jets 2 on
-            Console.WriteLine("Jets turned onto speed 1");
-            Thread.Sleep(10000);
+            Task.Factory.StartNew(() =>
+            {
+                ChemicalCycleRunning = true;
 
-            Console.WriteLine("Sleeping 5 mins for cycle to complete");
-            Thread.Sleep(int.Parse(new TimeSpan(0, 0, 2, 0).TotalMilliseconds.ToString()));
+                Jet1 = JetSpeed.One; // Put jets 1 into speed 1
+                Jet2 = JetSpeed.One; // Turn jets 2 on
+                Console.WriteLine("Jets turned onto speed 1");
+                Thread.Sleep(10000);
 
-            Jet1 = JetSpeed.Two;
-            Thread.Sleep(int.Parse(new TimeSpan(0, 0, 1, 0).TotalMilliseconds.ToString()));
+                Console.WriteLine("Sleeping 5 mins for cycle to complete");
+                Thread.Sleep(int.Parse(new TimeSpan(0, 0, 2, 0).TotalMilliseconds.ToString()));
 
-            Jet1 = JetSpeed.One;
-            Thread.Sleep(int.Parse(new TimeSpan(0, 0, 2, 0).TotalMilliseconds.ToString()));
+                Jet1 = JetSpeed.Two;
+                Thread.Sleep(int.Parse(new TimeSpan(0, 0, 1, 0).TotalMilliseconds.ToString()));
 
-            Jet1 = JetSpeed.Off;
-            Jet2 = JetSpeed.Off;
-            Console.WriteLine("Jet cycle complete");
+                Jet1 = JetSpeed.One;
+                Thread.Sleep(int.Parse(new TimeSpan(0, 0, 2, 0).TotalMilliseconds.ToString()));
+
+                Jet1 = JetSpeed.Off;
+                Jet2 = JetSpeed.Off;
+                Console.WriteLine("Jet cycle complete");
+
+                ChemicalCycleRunning = false;
+            });
+
         }
 
         private void UpdateHotTub_RawData(string deviceId)
@@ -400,9 +474,7 @@ namespace BalboaHotTubController
             while (true)
             {
                 var wr = (HttpWebRequest)WebRequest.Create("https://developer.idigi.com/ws/sci");
-                wr.Headers.Add("Cookie", "JSESSIONID = BC58572FF42D65B183B0318CF3B69470; BIGipServerAWS - DC - CC - Pool - 80 = 3959758764.20480.0000");
-                wr.Headers.Add("Authorization", "Basic QmFsYm9hV2F0ZXJJT1NBcHA6azJuVXBSOHIh");
-                wr.UserAgent = "Spa / 48 CFNetwork / 758.5.3 Darwin / 15.6.0";
+                AddBalboaHttpHeaders(wr);
                 wr.Method = "POST";
 
                 ASCIIEncoding encoding = new ASCIIEncoding();
@@ -424,6 +496,14 @@ namespace BalboaHotTubController
                 }
             }
         }
+
+        private static void AddBalboaHttpHeaders(HttpWebRequest wr)
+        {
+            wr.Headers.Add("Cookie", "JSESSIONID = BC58572FF42D65B183B0318CF3B69470; BIGipServerAWS - DC - CC - Pool - 80 = 3959758764.20480.0000");
+            wr.Headers.Add("Authorization", "Basic QmFsYm9hV2F0ZXJJT1NBcHA6azJuVXBSOHIh");
+            wr.UserAgent = "Spa / 48 CFNetwork / 758.5.3 Darwin / 15.6.0";
+        }
+
         private void Parse_PanelInfo_and_DeviceConfiguration_Response(HttpWebResponse response)
         {
             using (var reader = new StreamReader(response.GetResponseStream(), new ASCIIEncoding()))
@@ -471,6 +551,12 @@ namespace BalboaHotTubController
             var hexString = BitConverter.ToString(data);
             return hexString;
         }
+        
+
+        private static string GetPublicIP()
+        {
+           return new WebClient().DownloadString("http://icanhazip.com").TrimEnd(Environment.NewLine.ToCharArray());
+        }
 
         public enum HeatModeEnum
         {
@@ -497,11 +583,16 @@ namespace BalboaHotTubController
             Fade = 7
         }
 
+        public BalboaHotTub GetHotTubStatus()
+        {
+            return this;
+        }
+
         public override string ToString()
         {
             var sb = new StringBuilder();
-            sb.AppendLine($"Target Temp : {Get_TargetTemperature()}{Get_Temperature_Unit()}");
-            sb.AppendLine($"Current Temp: {Get_CurrentTemperature()}{Get_Temperature_Unit()}");
+            sb.AppendLine($"Target Temp : {TargetTemperature}{TemperatureUnit}");
+            sb.AppendLine($"Current Temp: {CurrentTemperature}{TemperatureUnit}");
             sb.AppendLine($"Heat Mode   : {HeatMode}");
             sb.AppendLine($"Jet 1       : {Jet1}");
             sb.AppendLine($"Jet 2       : {Jet2}");
